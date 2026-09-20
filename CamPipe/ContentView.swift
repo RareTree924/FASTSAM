@@ -17,6 +17,10 @@ struct ContentView: View {
             }
             .buttonStyle(.borderedProminent)
 
+            Text(pipe.detectorNote)
+                .font(.caption)
+                .foregroundColor(.secondary)
+
             Text(pipe.status)
                 .font(.footnote)
                 .foregroundColor(.secondary)
