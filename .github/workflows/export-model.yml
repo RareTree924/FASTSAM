@@ -16,7 +16,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install tools
-        run: pip install ultralytics coremltools
+        run: pip install ultralytics coremltools "numpy==1.26.4"
 
       - name: Export FastSAM-s to Core ML (480x480)
         run: yolo export model=FastSAM-s.pt format=coreml imgsz=480 half=True
