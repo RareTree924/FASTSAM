@@ -1,1 +1,41 @@
+name: Export FastSAM model
+on:
+  workflow_dispatch:
 
+permissions:
+  contents: write
+
+jobs:
+  export:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install tools
+        run: pip install ultralytics coremltools
+
+      - name: Export FastSAM-s to Core ML (480x480)
+        run: yolo export model=FastSAM-s.pt format=coreml imgsz=480 half=True
+
+      - name: Show model inputs and outputs
+        run: xcrun coremlcompiler metadata FastSAM-s.mlpackage
+
+      - name: Keep a downloadable copy
+        uses: actions/upload-artifact@v4
+        with:
+          name: FastSAM-s-mlpackage
+          path: FastSAM-s.mlpackage
+
+      - name: Save model into the repo
+        run: |
+          rm -rf CamPipe/FastSAM-s.mlpackage
+          mv FastSAM-s.mlpackage CamPipe/
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add CamPipe/FastSAM-s.mlpackage
+          git commit -m "Add FastSAM-s Core ML model (480x480)"
+          git push
