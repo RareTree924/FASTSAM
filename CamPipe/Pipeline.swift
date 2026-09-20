@@ -34,7 +34,18 @@ final class Pipeline: ObservableObject {
     @Published var boxes: [Box] = []
 
     private var task: Task<Void, Never>?
-    private let detector: Detector = StubDetector()
+    private let detector: Detector
+    @Published var detectorNote = ""
+
+    init() {
+        do {
+            detector = try FastSAMDetector()
+            detectorNote = "FastSAM-s loaded"
+        } catch {
+            detector = StubDetector()
+            detectorNote = "FastSAM not loaded (\(error.localizedDescription)); using fixed test boxes"
+        }
+    }
 
     func start() {
         guard !running else { return }
