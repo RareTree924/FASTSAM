@@ -146,7 +146,14 @@ def main():
         assert torch.equal(a[-1].weight, pf.model[-1].lrpc[i].loc.weight)
     print(f"checkpoints share {len(shared)} tensors - one model can give both scores")
 
+    # Same preparation as Ultralytics' own Core ML export: fold BatchNorms into the
+    # convs, and give the attention blocks their Core ML-friendly path.
+    from ultralytics.nn.modules.block import Attention
+    tp.fuse(verbose=False, imgsz=SIZE)
     net = YOLOEOutlines(tp, pf).eval()
+    for m in net.modules():
+        if isinstance(m, Attention):
+            m.format = "coreml"
     text_model = build_text_model("mobileclip:blt", device="cpu")
     text_net = TextEncoder(text_model.encoder, tp.model[-1]).eval()
 
@@ -190,7 +197,7 @@ def main():
     import coremltools as ct
 
     with torch.no_grad():
-        traced = torch.jit.trace(net, (x, tpe))
+        traced = torch.jit.trace(net, (x, tpe), strict=False, check_trace=False)
     mlmodel = ct.convert(
         traced,
         inputs=[ct.ImageType(name="image", shape=(1, 3, SIZE, SIZE), scale=1 / 255, color_layout=ct.colorlayout.RGB),
@@ -202,7 +209,7 @@ def main():
     mlmodel.save(os.path.join(args.out, "YOLOE-seg.mlpackage"))
 
     with torch.no_grad():
-        traced_t = torch.jit.trace(text_net, (tokens,))
+        traced_t = torch.jit.trace(text_net, (tokens,), strict=False, check_trace=False)
     tmodel = ct.convert(
         traced_t,
         inputs=[ct.TensorType(name="tokens", shape=(1, 77), dtype=np.int32)],
