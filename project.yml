@@ -7,6 +7,7 @@ targets:
   CamPipe:
     type: application
     platform: iOS
+    scheme: {}          # shared scheme, so xcodebuild -scheme CamPipe always finds it on CI
     sources:
       - path: CamPipe
     info:

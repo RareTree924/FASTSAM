@@ -4,7 +4,11 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-IMAGE = open(sys.argv[1] if len(sys.argv) > 1 else "test.jpg", "rb").read()
+# usage: mock_cam.py [photo.jpg] [min_score_pct merge_iou_pct]
+# The two percents play the S3's FastSAM settings; leave them out to act like
+# older firmware (the app then uses its own sliders).
+IMAGE = open(sys.argv[1] if len(sys.argv) > 1 else "test.jpeg", "rb").read()
+SAM = (int(sys.argv[2]), int(sys.argv[3])) if len(sys.argv) > 3 else None
 state = {"pending": False, "frame_id": 0}
 
 
@@ -32,6 +36,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "image/jpeg")
         self.send_header("X-Frame-Id", str(state["frame_id"]))
+        if SAM:
+            self.send_header("X-Sam-Min-Score", str(SAM[0]))
+            self.send_header("X-Sam-Merge-Iou", str(SAM[1]))
         self.send_header("Content-Length", str(len(IMAGE)))
         self.end_headers()
         self.wfile.write(IMAGE)

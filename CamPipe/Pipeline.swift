@@ -37,7 +37,31 @@ final class Pipeline: ObservableObject {
     private let detector: Detector
     @Published var detectorNote = ""
 
+    // ---- FastSAM settings ----
+    // The phone's own values (sliders), remembered between launches.
+    @Published var phoneSettings: SamSettings {
+        didSet {
+            UserDefaults.standard.set(phoneSettings.minScore, forKey: "samMinScore")
+            UserDefaults.standard.set(phoneSettings.mergeIoU, forKey: "samMergeIoU")
+        }
+    }
+    /// On: use the settings the S3 sends with each photo (its Settings -> Camera menu).
+    /// Off, or when the photo carries none (older firmware, mock camera): use the sliders.
+    @Published var useS3Settings: Bool {
+        didSet { UserDefaults.standard.set(useS3Settings, forKey: "samUseS3") }
+    }
+    @Published var s3Settings: SamSettings?        // from the last photo, if it had any
+    @Published var lastUsedSettings: SamSettings?  // what the last detection actually ran with
+
     init() {
+        let d = UserDefaults.standard
+        d.register(defaults: ["samMinScore": SamSettings().minScore,
+                              "samMergeIoU": SamSettings().mergeIoU,
+                              "samUseS3": true])
+        phoneSettings = SamSettings(minScore: d.float(forKey: "samMinScore"),
+                                    mergeIoU: d.float(forKey: "samMergeIoU"))
+        useS3Settings = d.bool(forKey: "samUseS3")
+
         do {
             detector = try FastSAMDetector()
             detectorNote = "FastSAM-s loaded"
@@ -62,6 +86,14 @@ final class Pipeline: ObservableObject {
         status = "Stopped"
     }
 
+    /// X-Sam-Min-Score / X-Sam-Merge-Iou (whole percents) from the CAM, if both are present.
+    private static func samSettings(from http: HTTPURLResponse) -> SamSettings? {
+        guard let s = http.value(forHTTPHeaderField: "X-Sam-Min-Score").flatMap(Int.init),
+              let m = http.value(forHTTPHeaderField: "X-Sam-Merge-Iou").flatMap(Int.init) else { return nil }
+        return SamSettings(minScore: Float(min(max(s, 0), 100)) / 100,
+                           mergeIoU: Float(min(max(m, 0), 100)) / 100)
+    }
+
     private func pause(_ ms: Int) async {
         try? await Task.sleep(nanoseconds: UInt64(ms) * 1_000_000)
     }
@@ -70,6 +102,7 @@ final class Pipeline: ObservableObject {
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 4
         let session = URLSession(configuration: config)
+        defer { session.invalidateAndCancel() }   // a new session is made on every Start
 
         while !Task.isCancelled {
             do {
@@ -85,7 +118,10 @@ final class Pipeline: ObservableObject {
 
                 // 1. Ask for a photo. 204 means "nothing yet".
                 let (data, response) = try await session.data(from: frameURL)
-                guard let http = response as? HTTPURLResponse else { continue }
+                guard let http = response as? HTTPURLResponse else {
+                    await pause(500)
+                    continue
+                }
                 if http.statusCode == 204 {
                     status = "Waiting for a capture request..."
                     await pause(200)
@@ -111,9 +147,12 @@ final class Pipeline: ObservableObject {
                 }
                 preview = UIImage(cgImage: square)
 
-                // 3. Detect.
+                // 3. Detect, with the S3's settings if this photo carries them.
+                s3Settings = Self.samSettings(from: http)
+                let settings = (useS3Settings ? s3Settings : nil) ?? phoneSettings
+                lastUsedSettings = settings
                 let t0 = Date()
-                let found = try await detector.detect(square)
+                let found = try await detector.detect(square, settings: settings)
                 boxes = found
                 let ms = Int(Date().timeIntervalSince(t0) * 1000)
 
@@ -123,6 +162,7 @@ final class Pipeline: ObservableObject {
                 req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
                 let (_, resp) = try await session.upload(for: req, from: encodeBoxes(frameId: frameId, boxes: found))
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                if Task.isCancelled { break }   // don't overwrite "Stopped"
                 status = "frame \(frameId): \(found.count) boxes, \(ms) ms detect, POST -> HTTP \(code)"
             } catch {
                 if Task.isCancelled { break }

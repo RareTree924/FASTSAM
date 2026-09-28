@@ -10,13 +10,19 @@ struct Box {
     var h: Int
 }
 
+/// FastSAM tuning, both 0...1. Set on the phone, or sent by the S3 with each photo.
+struct SamSettings: Equatable {
+    var minScore: Float = 0.40   // show a box only if FastSAM is at least this sure
+    var mergeIoU: Float = 0.70   // boxes overlapping more than this are merged into one
+}
+
 protocol Detector {
-    func detect(_ image: CGImage) async throws -> [Box]
+    func detect(_ image: CGImage, settings: SamSettings) async throws -> [Box]
 }
 
 /// Placeholder used only if the real model can't be loaded.
 struct StubDetector: Detector {
-    func detect(_ image: CGImage) async throws -> [Box] {
+    func detect(_ image: CGImage, settings: SamSettings) async throws -> [Box] {
         return [
             Box(x: 120, y: 120, w: 240, h: 240),
             Box(x: 20,  y: 20,  w: 100, h: 60),
@@ -40,9 +46,7 @@ enum DetectorError: LocalizedError {
 /// boxes only. Output layout: [1, 37, 4725] = 4 box values (center x, center y,
 /// width, height) + 1 score + 32 mask coefficients, for each of 4725 candidates.
 final class FastSAMDetector: Detector {
-    // ---- Tunables ----
-    private let minScore: Float = 0.4    // drop candidates below this confidence
-    private let nmsIoU: Float = 0.7      // boxes overlapping more than this count as duplicates
+    // ---- Tunables (confidence and merge overlap come in per frame as SamSettings) ----
     private let minSide: Float = 12      // drop boxes smaller than this many pixels
     private let maxBoxes = 25            // must match CAM_MAX_BOXES on the ESP32 side
     private let size: Float = 480        // model input size in pixels
@@ -86,7 +90,7 @@ final class FastSAMDetector: Detector {
         throw DetectorError.modelMissing
     }
 
-    func detect(_ image: CGImage) async throws -> [Box] {
+    func detect(_ image: CGImage, settings: SamSettings) async throws -> [Box] {
         let feature = try MLFeatureValue(cgImage: image, constraint: constraint, options: nil)
         let input = try MLDictionaryFeatureProvider(dictionary: [inputName: feature])
 
@@ -95,10 +99,10 @@ final class FastSAMDetector: Detector {
             try model.prediction(from: input)
         }.value
 
-        return try decode(output)
+        return try decode(output, minScore: settings.minScore, nmsIoU: settings.mergeIoU)
     }
 
-    private func decode(_ output: MLFeatureProvider) throws -> [Box] {
+    private func decode(_ output: MLFeatureProvider, minScore: Float, nmsIoU: Float) throws -> [Box] {
         // Pick the 3-D output ([1, 37, 4725]); the mask prototypes are 4-D and ignored.
         var found: MLMultiArray?
         for name in output.featureNames {
