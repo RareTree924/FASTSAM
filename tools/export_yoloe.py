@@ -217,8 +217,11 @@ def main():
         minimum_deployment_target=ct.target.iOS16,
         compute_precision=ct.precision.FLOAT32,   # small model, run once per prompt: keep it exact
     )
+    # 8-bit weights keep it under GitHub's 100 MB file limit. Only the big matrices: the
+    # 77x77 causal attention mask (5,929 values, full of -inf) must stay as it is.
     tmodel = ct.optimize.coreml.linear_quantize_weights(
-        tmodel, ct.optimize.coreml.OptimizationConfig(ct.optimize.coreml.OpLinearQuantizerConfig(mode="linear_symmetric")))
+        tmodel, ct.optimize.coreml.OptimizationConfig(
+            ct.optimize.coreml.OpLinearQuantizerConfig(mode="linear_symmetric", weight_threshold=20000)))
     tmodel.short_description = "MobileCLIP-B(LT) text encoder + YOLOE text adapter"
     tmodel.save(os.path.join(args.out, "YOLOE-text.mlpackage"))
 
@@ -228,12 +231,20 @@ def main():
         cdet = torch.from_numpy(out["det"])
         print("coreml, text 'bus':", top(cdet, 0))
         print("coreml, everything:", top(cdet, 1))
-        print("coreml det max diff:", (cdet - det).abs().max().item(),
-              "proto max diff:", (torch.from_numpy(out["proto"]) - proto).abs().max().item())
+        # FP16 on the phone: compare where it matters, the 100 most confident spots of each score.
+        for ch, name in ((0, "text"), (1, "everything")):
+            idx = det[0, 4 + ch].argsort(descending=True)[:100]
+            d = (cdet[0][:, idx] - det[0][:, idx]).abs()
+            print(f"coreml vs PyTorch, top-100 {name}: box max diff {d[:4].max():.2f} px, "
+                  f"score max diff {d[4:6].max():.3f}, mask coeff max diff {d[6:].max():.3f}")
+        print("proto mean abs diff:", (torch.from_numpy(out["proto"]) - proto).abs().mean().item())
         ct_tpe = tmodel.predict({"tokens": tokens.numpy().astype(np.int32)})["text"]
         cos = F.cosine_similarity(torch.from_numpy(ct_tpe).flatten(), tpe.flatten(), dim=0).item()
         print("coreml text embedding cosine vs PyTorch:", cos)
         assert cos > 0.99, "quantized text encoder drifted too far"
+        for name in ("YOLOE-seg.mlpackage", "YOLOE-text.mlpackage"):
+            total = sum(os.path.getsize(os.path.join(dp, f)) for dp, _, fs in os.walk(os.path.join(args.out, name)) for f in fs)
+            print(f"{name}: {total / 1e6:.1f} MB")
 
 
 if __name__ == "__main__":
