@@ -52,7 +52,10 @@ class YOLOEOutlines(nn.Module):
         self.bn = nn.ModuleList(h.norm for h in head.cv4)
         self.register_buffer("scale", torch.stack([h.logit_scale.exp().reshape(()) for h in head.cv4]))
         self.register_buffer("bias", torch.stack([h.bias.reshape(()) for h in head.cv4]))
-        self.vocab = nn.ModuleList(l.vocab for l in pf_head.lrpc)     # 256 -> 4585 (Linear, or Conv2d when not enabled)
+        # 256 -> 4585 names. All as Linear, so the export can keep exactly these in FP32.
+        from ultralytics.nn.modules.head import LRPCHead
+        self.vocab = nn.ModuleList(l.vocab if isinstance(l.vocab, nn.Linear) else LRPCHead.conv2linear(l.vocab)
+                                   for l in pf_head.lrpc)
 
         with torch.no_grad():
             feats = self._feats(torch.zeros(1, 3, SIZE, SIZE))
@@ -81,12 +84,8 @@ class YOLOEOutlines(nn.Module):
             c = self.cls_feat[i](feats[i])                            # [b, 256, H, W]
             e = self.bn[i](self.cls_embed[i](c)).flatten(2)           # [b, 512, N]
             tp_scores.append(torch.einsum("bcn,bkc->bkn", e, w) * self.scale[i] + self.bias[i])
-            v = self.vocab[i]
-            if isinstance(v, nn.Linear):
-                logits = v(c.flatten(2).transpose(1, 2)).amax(-1, keepdim=True).transpose(1, 2)
-            else:
-                logits = v(c).flatten(2).amax(1, keepdim=True)
-            pf_scores.append(logits)
+            logits = self.vocab[i](c.flatten(2).transpose(1, 2))      # [b, N, 4585]
+            pf_scores.append(logits.amax(-1, keepdim=True).transpose(1, 2))
         scores = torch.cat([torch.cat(tp_scores, 2), torch.cat(pf_scores, 2)], 1).sigmoid()
 
         mc = torch.cat([self.cv5[i](feats[i]).view(b, -1, feats[i].shape[2] * feats[i].shape[3])
@@ -95,16 +94,35 @@ class YOLOEOutlines(nn.Module):
 
 
 class TextEncoder(nn.Module):
-    """Tokens -> YOLOE text prompt embedding (what YOLOEModel.get_text_pe returns)."""
+    """Tokens -> YOLOE text prompt embedding (what YOLOEModel.get_text_pe returns).
 
-    def __init__(self, enc, head):
+    Re-states the top level of Ultralytics' MobileCLIP-B(LT) TorchScript text encoder
+    with its own trained layers, in a Core ML-friendly way: the TorchScript builds
+    its causal mask with in-place ops on an empty tensor and picks the end token with
+    an index gather - both convert wrongly. Here the mask is a constant and the end
+    token is picked with a one-hot sum. Checked against the original below.
+    """
+
+    def __init__(self, ts, head):
         super().__init__()
-        self.enc = enc
+        te = ts.text_encoder
+        self.embedding = te.embedding_layer
+        self.pos = nn.Parameter(te.positional_embedding.pos_embed.pos_embed.detach().reshape(1, -1, 512))
+        self.blocks = nn.ModuleList(getattr(te.transformer, str(i)) for i in range(len(list(te.transformer.children()))))
+        self.final_norm = te.final_layer_norm
+        self.proj = nn.Parameter(te.projection_layer.detach())
+        n = self.pos.shape[1]
+        self.register_buffer("mask", torch.full((1, n, n), float("-inf")).triu(1))   # [batch, n, n]
         self.reprta = head.reprta
 
     def forward(self, tokens):
-        t = self.enc(tokens)                                           # MobileCLIP output, already normalized
-        return F.normalize(self.reprta(t), dim=-1, p=2).unsqueeze(1)   # [b, 1, 512]
+        x = self.embedding(tokens) + self.pos
+        for block in self.blocks:
+            x = block(x, self.mask)
+        x = self.final_norm(x)
+        end = (tokens == 49407).to(x.dtype).unsqueeze(-1)            # one-hot at <|endoftext|>
+        t = F.normalize((x * end).sum(1) @ self.proj, dim=-1, p=2)   # MobileCLIP text feature
+        return F.normalize(self.reprta(t), dim=-1, p=2).unsqueeze(1)  # [b, 1, 512]
 
 
 def load_image():
@@ -156,6 +174,13 @@ def main():
             m.format = "coreml"
     text_model = build_text_model("mobileclip:blt", device="cpu")
     text_net = TextEncoder(text_model.encoder, tp.model[-1]).eval()
+    with torch.no_grad():   # the re-stated encoder must match the original on several texts
+        many = text_model.tokenize(["bus", "a red apple", "USB-C cable", "x"])
+        want = tp.model[-1].get_tpe(text_model.encode_text(many).unsqueeze(0))[0]
+        got = torch.cat([text_net(many[i:i + 1])[:, 0] for i in range(len(many))])
+        err = (got - want).abs().max().item()
+    print("re-stated text encoder vs original: max diff", err)
+    assert err < 1e-4, "re-stated text encoder does not match the original"
 
     im = load_image()
     x = torch.from_numpy(np.asarray(im)).permute(2, 0, 1)[None].float() / 255
@@ -204,6 +229,10 @@ def main():
                 ct.TensorType(name="text", shape=(1, 1, 512))],
         outputs=[ct.TensorType(name="det"), ct.TensorType(name="proto")],
         minimum_deployment_target=ct.target.iOS16,
+        # FP16 everywhere except the 4,585-name vocabulary and its max (the only linear /
+        # reduce_max ops), where FP16 rounding visibly moved the "everything" score.
+        compute_precision=ct.transform.FP16ComputePrecision(
+            op_selector=lambda op: op.op_type not in {"linear", "reduce_max"}),
     )
     mlmodel.short_description = "YOLOE-11L-seg: text-prompted + prompt-free boxes and masks, 480x480"
     mlmodel.save(os.path.join(args.out, "YOLOE-seg.mlpackage"))
@@ -231,12 +260,12 @@ def main():
         cdet = torch.from_numpy(out["det"])
         print("coreml, text 'bus':", top(cdet, 0))
         print("coreml, everything:", top(cdet, 1))
-        # FP16 on the phone: compare where it matters, the 100 most confident spots of each score.
+        # FP16 on the phone: compare where it matters, the spots the app keeps (score >= 0.25).
         for ch, name in ((0, "text"), (1, "everything")):
-            idx = det[0, 4 + ch].argsort(descending=True)[:100]
+            idx = (det[0, 4 + ch] >= 0.25).nonzero().flatten()
             d = (cdet[0][:, idx] - det[0][:, idx]).abs()
-            print(f"coreml vs PyTorch, top-100 {name}: box max diff {d[:4].max():.2f} px, "
-                  f"score max diff {d[4:6].max():.3f}, mask coeff max diff {d[6:].max():.3f}")
+            print(f"coreml vs PyTorch, {len(idx)} {name} spots >= 0.25: box max diff {d[:4].max():.2f} px, "
+                  f"score max diff {d[4 + ch].max():.3f}, mask coeff mean diff {d[6:].mean():.4f}")
         print("proto mean abs diff:", (torch.from_numpy(out["proto"]) - proto).abs().mean().item())
         ct_tpe = tmodel.predict({"tokens": tokens.numpy().astype(np.int32)})["text"]
         cos = F.cosine_similarity(torch.from_numpy(ct_tpe).flatten(), tpe.flatten(), dim=0).item()
