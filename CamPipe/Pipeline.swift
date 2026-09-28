@@ -25,6 +25,30 @@ private func encodeBoxes(frameId: UInt8, boxes: [Box]) -> Data {
     return Data(bytes)
 }
 
+/// The outline bitmap as a green-on-transparent picture for the preview (each
+/// border pixel drawn 2x2 so it shows up at phone size).
+private func outlineImage(_ bits: Data) -> UIImage? {
+    let n = outSize
+    var rgba = [UInt8](repeating: 0, count: n * n * 4)
+    bits.withUnsafeBytes { (b: UnsafeRawBufferPointer) in
+        for y in 0..<n {
+            for x in 0..<n where b[y * (n / 8) + x / 8] & (0x80 >> UInt8(x % 8)) != 0 {
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] where x + dx < n && y + dy < n {
+                    let o = ((y + dy) * n + x + dx) * 4
+                    rgba[o] = 0; rgba[o + 1] = 255; rgba[o + 2] = 0; rgba[o + 3] = 255
+                }
+            }
+        }
+    }
+    guard let provider = CGDataProvider(data: Data(rgba) as CFData),
+          let cg = CGImage(width: n, height: n, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: n * 4,
+                           space: CGColorSpaceCreateDeviceRGB(),
+                           bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                           provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+    else { return nil }
+    return UIImage(cgImage: cg)
+}
+
 @MainActor
 final class Pipeline: ObservableObject {
     @Published var baseURL = "http://192.168.4.1"
@@ -32,21 +56,24 @@ final class Pipeline: ObservableObject {
     @Published var status = "Idle"
     @Published var preview: UIImage?
     @Published var boxes: [Box] = []
+    @Published var outline: UIImage?    // the last photo's borders, drawn over the preview
 
     private var task: Task<Void, Never>?
     private let detector: Detector
     @Published var detectorNote = ""
 
-    // ---- FastSAM settings ----
-    // The phone's own values (sliders), remembered between launches.
+    // ---- segmentation settings ----
+    // The phone's own values (sliders + what to outline), remembered between launches.
     @Published var phoneSettings: SamSettings {
         didSet {
             UserDefaults.standard.set(phoneSettings.minScore, forKey: "samMinScore")
             UserDefaults.standard.set(phoneSettings.mergeIoU, forKey: "samMergeIoU")
+            UserDefaults.standard.set(phoneSettings.prompt, forKey: "samPrompt")
         }
     }
-    /// On: use the settings the S3 sends with each photo (its Settings -> Camera menu).
-    /// Off, or when the photo carries none (older firmware, mock camera): use the sliders.
+    /// On: use what the S3 sends with each photo (its Tools menu + what you typed after
+    /// taking the photo). Off, or when the photo carries none (older firmware, mock
+    /// camera): use the phone's own settings.
     @Published var useS3Settings: Bool {
         didSet { UserDefaults.standard.set(useS3Settings, forKey: "samUseS3") }
     }
@@ -57,17 +84,19 @@ final class Pipeline: ObservableObject {
         let d = UserDefaults.standard
         d.register(defaults: ["samMinScore": SamSettings().minScore,
                               "samMergeIoU": SamSettings().mergeIoU,
+                              "samPrompt": "",
                               "samUseS3": true])
         phoneSettings = SamSettings(minScore: d.float(forKey: "samMinScore"),
-                                    mergeIoU: d.float(forKey: "samMergeIoU"))
+                                    mergeIoU: d.float(forKey: "samMergeIoU"),
+                                    prompt: d.string(forKey: "samPrompt") ?? "")
         useS3Settings = d.bool(forKey: "samUseS3")
 
         do {
-            detector = try FastSAMDetector()
-            detectorNote = "FastSAM-s loaded"
+            detector = try YOLOEDetector()
+            detectorNote = "YOLOE-11L loaded"
         } catch {
             detector = StubDetector()
-            detectorNote = "FastSAM not loaded (\(error.localizedDescription)); using fixed test boxes"
+            detectorNote = "YOLOE not loaded (\(error.localizedDescription)); using fixed test boxes"
         }
     }
 
@@ -86,12 +115,15 @@ final class Pipeline: ObservableObject {
         status = "Stopped"
     }
 
-    /// X-Sam-Min-Score / X-Sam-Merge-Iou (whole percents) from the CAM, if both are present.
+    /// X-Sam-Min-Score / X-Sam-Merge-Iou (whole percents) from the CAM, if both are present,
+    /// plus X-Sam-Prompt (percent-encoded; missing = outline everything).
     private static func samSettings(from http: HTTPURLResponse) -> SamSettings? {
         guard let s = http.value(forHTTPHeaderField: "X-Sam-Min-Score").flatMap(Int.init),
               let m = http.value(forHTTPHeaderField: "X-Sam-Merge-Iou").flatMap(Int.init) else { return nil }
+        let prompt = http.value(forHTTPHeaderField: "X-Sam-Prompt")?.removingPercentEncoding ?? ""
         return SamSettings(minScore: Float(min(max(s, 0), 100)) / 100,
-                           mergeIoU: Float(min(max(m, 0), 100)) / 100)
+                           mergeIoU: Float(min(max(m, 0), 100)) / 100,
+                           prompt: prompt)
     }
 
     private func pause(_ ms: Int) async {
@@ -136,7 +168,8 @@ final class Pipeline: ObservableObject {
                     continue
                 }
 
-                // 2. Center-crop the 480x480 square (x offset 80 for a 640x480 photo).
+                // 2. Center-crop the 480x480 square (x offset 80 for a 640x480 photo; the
+                //    OV2640 sends 480x480, where this is a no-op).
                 let cx = (photo.width - outSize) / 2
                 let cy = (photo.height - outSize) / 2
                 guard cx >= 0, cy >= 0,
@@ -146,24 +179,31 @@ final class Pipeline: ObservableObject {
                     continue
                 }
                 preview = UIImage(cgImage: square)
+                outline = nil
 
-                // 3. Detect, with the S3's settings if this photo carries them.
+                // 3. Outline, with the S3's settings and words if this photo carries them.
                 s3Settings = Self.samSettings(from: http)
                 let settings = (useS3Settings ? s3Settings : nil) ?? phoneSettings
                 lastUsedSettings = settings
+                status = settings.prompt.isEmpty ? "Outlining everything..." : "Looking for \"\(settings.prompt)\"..."
                 let t0 = Date()
                 let found = try await detector.detect(square, settings: settings)
-                boxes = found
+                boxes = found.boxes
+                outline = found.outline.flatMap(outlineImage)
                 let ms = Int(Date().timeIntervalSince(t0) * 1000)
 
-                // 4. Send the boxes back to the CAM (it relays them to the S3).
+                // 4. Send boxes + borders back to the CAM (it relays them to the S3).
+                //    Only the geometry goes back - no class names.
+                var body = encodeBoxes(frameId: frameId, boxes: found.boxes)
+                if let bits = found.outline, bits.count == Detection.outlineBytes { body.append(bits) }
                 var req = URLRequest(url: resultURL)
                 req.httpMethod = "POST"
                 req.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
-                let (_, resp) = try await session.upload(for: req, from: encodeBoxes(frameId: frameId, boxes: found))
+                let (_, resp) = try await session.upload(for: req, from: body)
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
                 if Task.isCancelled { break }   // don't overwrite "Stopped"
-                status = "frame \(frameId): \(found.count) boxes, \(ms) ms detect, POST -> HTTP \(code)"
+                let what = settings.prompt.isEmpty ? "everything" : "\"\(settings.prompt)\""
+                status = "frame \(frameId): \(found.boxes.count) outlined (\(what)), \(ms) ms, POST -> HTTP \(code)"
             } catch {
                 if Task.isCancelled { break }
                 status = "Error: \(error.localizedDescription)"

@@ -32,14 +32,22 @@ struct ContentView: View {
                         .resizable()
                         .aspectRatio(1, contentMode: .fit)
                         .overlay(
-                            GeometryReader { geo in
-                                let s = geo.size.width / 480
-                                ForEach(Array(pipe.boxes.enumerated()), id: \.offset) { _, b in
-                                    Rectangle()
-                                        .stroke(Color.green, lineWidth: 2)
-                                        .frame(width: CGFloat(b.w) * s, height: CGFloat(b.h) * s)
-                                        .position(x: (CGFloat(b.x) + CGFloat(b.w) / 2) * s,
-                                                  y: (CGFloat(b.y) + CGFloat(b.h) / 2) * s)
+                            Group {
+                                if let outline = pipe.outline {   // the borders, exactly as the S3 gets them
+                                    Image(uiImage: outline)
+                                        .resizable()
+                                        .interpolation(.none)
+                                } else {                          // boxes only (stub detector)
+                                    GeometryReader { geo in
+                                        let s = geo.size.width / 480
+                                        ForEach(Array(pipe.boxes.enumerated()), id: \.offset) { _, b in
+                                            Rectangle()
+                                                .stroke(Color.green, lineWidth: 2)
+                                                .frame(width: CGFloat(b.w) * s, height: CGFloat(b.h) * s)
+                                                .position(x: (CGFloat(b.x) + CGFloat(b.w) / 2) * s,
+                                                          y: (CGFloat(b.y) + CGFloat(b.h) / 2) * s)
+                                        }
+                                    }
                                 }
                             }
                         )
@@ -55,30 +63,42 @@ struct ContentView: View {
 
     private var settingsPanel: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("FastSAM settings").font(.headline)
+            Text("YOLOE settings").font(.headline)
 
             Toggle("Use the S3's settings", isOn: $pipe.useS3Settings)
-            Text(pipe.s3Settings.map { "S3 sent: confidence \(pct($0.minScore)), merge overlap \(pct($0.mergeIoU))" }
-                 ?? "The last photo carried no S3 settings, so the sliders below are used.")
+            Text(pipe.s3Settings.map { s3 in
+                "S3 sent: \(s3.prompt.isEmpty ? "outline everything" : "find \"\(s3.prompt)\""), "
+                    + "confidence \(pct(s3.minScore)), merge overlap \(pct(s3.mergeIoU))"
+            } ?? "The last photo carried no S3 settings, so the phone's settings below are used.")
                 .font(.caption)
+                .foregroundColor(.secondary)
+
+            Text("What to outline (phone)").font(.subheadline)
+            TextField("Blank = everything", text: $pipe.phoneSettings.prompt)
+                .textFieldStyle(.roundedBorder)
+                .textInputAutocapitalization(.never)
+                .disableAutocorrection(true)
+            Text("Type a thing, e.g. \"mug\", to outline only that. On the S3 you type it right after taking the photo.")
+                .font(.caption2)
                 .foregroundColor(.secondary)
 
             Text("Min confidence (phone): \(pct(pipe.phoneSettings.minScore))")
                 .font(.subheadline)
             Slider(value: $pipe.phoneSettings.minScore, in: 0.05...0.95, step: 0.05)
-            Text("Show a box only if FastSAM is at least this sure. Lower = more boxes.")
+            Text("Outline an object only if YOLOE is at least this sure. Lower = more outlines.")
                 .font(.caption2)
                 .foregroundColor(.secondary)
 
             Text("Merge overlap (phone): \(pct(pipe.phoneSettings.mergeIoU))")
                 .font(.subheadline)
             Slider(value: $pipe.phoneSettings.mergeIoU, in: 0.05...1.0, step: 0.05)
-            Text("Boxes overlapping more than this are merged into one. Lower = merge more.")
+            Text("Objects overlapping more than this count as one. Lower = merge more.")
                 .font(.caption2)
                 .foregroundColor(.secondary)
 
             if let used = pipe.lastUsedSettings {
-                Text("Last detection used \(pct(used.minScore)) / \(pct(used.mergeIoU))")
+                Text("Last run: \(used.prompt.isEmpty ? "everything" : "\"\(used.prompt)\""), "
+                     + "\(pct(used.minScore)) / \(pct(used.mergeIoU))")
                     .font(.caption)
             }
         }

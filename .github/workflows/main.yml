@@ -9,6 +9,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Test the CLIP tokenizer against Python's
+        run: |
+          swiftc -O CamPipe/Tokenizer.swift tools/tokenizer_test/main.swift -o tokenizer_test
+          ./tokenizer_test CamPipe/clip_merges.txt tools/tokenizer_tests.json
+
       - name: Install XcodeGen
         run: brew install xcodegen
 

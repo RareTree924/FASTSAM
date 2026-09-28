@@ -2,7 +2,7 @@ name: CamPipe
 options:
   bundleIdPrefix: dev.local
   deploymentTarget:
-    iOS: "15.0"
+    iOS: "16.0"   # the YOLOE Core ML models are built for iOS 16+
 targets:
   CamPipe:
     type: application

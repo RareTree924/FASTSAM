@@ -2,13 +2,16 @@ import struct
 import sys
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-# usage: mock_cam.py [photo.jpg] [min_score_pct merge_iou_pct]
-# The two percents play the S3's FastSAM settings; leave them out to act like
-# older firmware (the app then uses its own sliders).
+# usage: mock_cam.py [photo.jpg] [min_score_pct merge_iou_pct [what to outline]]
+# The percents (and words) play what the S3 sends; leave them out to act like
+# older firmware (the app then uses its own settings).
 IMAGE = open(sys.argv[1] if len(sys.argv) > 1 else "test.jpeg", "rb").read()
 SAM = (int(sys.argv[2]), int(sys.argv[3])) if len(sys.argv) > 3 else None
+PROMPT = " ".join(sys.argv[4:])
+OUTLINE_BYTES = 480 * 480 // 8
 state = {"pending": False, "frame_id": 0}
 
 
@@ -39,6 +42,8 @@ class Handler(BaseHTTPRequestHandler):
         if SAM:
             self.send_header("X-Sam-Min-Score", str(SAM[0]))
             self.send_header("X-Sam-Merge-Iou", str(SAM[1]))
+            if PROMPT:
+                self.send_header("X-Sam-Prompt", urllib.parse.quote(PROMPT, safe=""))
         self.send_header("Content-Length", str(len(IMAGE)))
         self.end_headers()
         self.wfile.write(IMAGE)
@@ -50,7 +55,10 @@ class Handler(BaseHTTPRequestHandler):
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
         msg_type, frame_id, w, h, count = struct.unpack_from("<BBHHB", body, 0)
         boxes = [struct.unpack_from("<HHHH", body, 7 + i * 8) for i in range(count)]
-        print(f"[mock] result: type={msg_type} frame={frame_id} {w}x{h} boxes={boxes}")
+        outline = body[7 + count * 8:]
+        border = sum(bin(b).count("1") for b in outline)
+        print(f"[mock] result: type={msg_type} frame={frame_id} {w}x{h} boxes={boxes} "
+              f"outline={'%d border pixels' % border if len(outline) == OUTLINE_BYTES else 'none'}")
         self.send_response(200)
         self.send_header("Content-Length", "2")
         self.end_headers()
