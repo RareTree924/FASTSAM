@@ -1,0 +1,43 @@
+name: Export YOLOE model
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - tools/export_yoloe.py
+      - .github/workflows/export-yoloe.yml
+
+permissions:
+  contents: write
+
+jobs:
+  export:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install tools
+        run: pip install "ultralytics==8.4.164" coremltools "torch==2.7.0" "torchvision==0.22.0" "git+https://github.com/ultralytics/CLIP.git"
+
+      - name: Export YOLOE-11L-seg + text encoder to Core ML (480x480), and check them against PyTorch
+        run: python tools/export_yoloe.py --out export
+
+      - name: Keep a downloadable copy
+        uses: actions/upload-artifact@v4
+        with:
+          name: YOLOE-coreml
+          path: export
+
+      - name: Save the models into the repo (replaces FastSAM)
+        run: |
+          rm -rf CamPipe/FastSAM-s.mlpackage CamPipe/YOLOE-seg.mlpackage CamPipe/YOLOE-text.mlpackage
+          cp -R export/YOLOE-seg.mlpackage export/YOLOE-text.mlpackage export/clip_merges.txt CamPipe/
+          cp export/tokenizer_tests.json tools/
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git add -A CamPipe tools
+          git commit -m "Add YOLOE-11L-seg + text encoder Core ML models (480x480)"
+          git push
