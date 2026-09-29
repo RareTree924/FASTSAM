@@ -91,12 +91,22 @@ final class Pipeline: ObservableObject {
                                     prompt: d.string(forKey: "samPrompt") ?? "")
         useS3Settings = d.bool(forKey: "samUseS3")
 
+        // YOLOE outlines everything when nothing is typed; SAM 3 handles typed words.
+        let yoloe: Detector
         do {
-            detector = try YOLOEDetector()
+            yoloe = try YOLOEDetector()
             detectorNote = "YOLOE-11L loaded"
         } catch {
-            detector = StubDetector()
+            yoloe = StubDetector()
             detectorNote = "YOLOE not loaded (\(error.localizedDescription)); using fixed test boxes"
+        }
+        let sam = SAM3Detector(fallback: yoloe)
+        detector = sam
+        let yoloeNote = detectorNote
+        detectorNote = yoloeNote + " · SAM 3 loading..."
+        Task { [weak self] in
+            let note = await sam.status()
+            self?.detectorNote = yoloeNote + " · " + note
         }
     }
 
@@ -203,7 +213,7 @@ final class Pipeline: ObservableObject {
                 let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
                 if Task.isCancelled { break }   // don't overwrite "Stopped"
                 let what = settings.prompt.isEmpty ? "everything" : "\"\(settings.prompt)\""
-                status = "frame \(frameId): \(found.boxes.count) outlined (\(what)), \(ms) ms, POST -> HTTP \(code)"
+                status = "frame \(frameId): \(found.boxes.count) outlined (\(what), \(found.model)), \(ms) ms, POST -> HTTP \(code)"
             } catch {
                 if Task.isCancelled { break }
                 status = "Error: \(error.localizedDescription)"

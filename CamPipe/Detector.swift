@@ -20,12 +20,32 @@ struct SamSettings: Equatable {
 
 /// What goes back to the S3: where the objects are and their borders. No class names.
 struct Detection {
-    static let outlineBytes = 480 * 480 / 8   // CAM_OUTLINE_BYTES
+    static let size = 480                     // CAM_OUT_SIZE
+    static let outlineBytes = size * size / 8 // CAM_OUTLINE_BYTES
 
     var boxes: [Box]
     /// 1 bit per pixel, row-major, 60 bytes per row, most significant bit = leftmost pixel.
     /// A set bit is a border pixel. nil = boxes only.
     var outline: Data?
+    var model: String   // which model made it, for the status line
+
+    /// Adds a mask's border to `outline`: inside pixels with a 4-neighbour outside (or on the
+    /// mask's own edge). `inside` is w x h with its top-left at (ox, oy) in the 480x480 photo;
+    /// only columns minX...maxX and rows minY...maxY of it are looked at.
+    static func addBorder(of inside: [Bool], w: Int, h: Int, at ox: Int, _ oy: Int,
+                          within minX: Int, _ minY: Int, _ maxX: Int, _ maxY: Int, to outline: inout [UInt8]) {
+        for y in minY...maxY {
+            for x in minX...maxX where inside[y * w + x] {
+                let edge = x == 0 || y == 0 || x == w - 1 || y == h - 1 ||
+                    !inside[y * w + x - 1] || !inside[y * w + x + 1] ||
+                    !inside[(y - 1) * w + x] || !inside[(y + 1) * w + x]
+                if edge {
+                    let px = ox + x, py = oy + y
+                    outline[py * (size / 8) + px / 8] |= 0x80 >> UInt8(px % 8)
+                }
+            }
+        }
+    }
 }
 
 protocol Detector {
@@ -35,7 +55,8 @@ protocol Detector {
 /// Placeholder used only if the real model can't be loaded.
 struct StubDetector: Detector {
     func detect(_ image: CGImage, settings: SamSettings) async throws -> Detection {
-        Detection(boxes: [Box(x: 120, y: 120, w: 240, h: 240), Box(x: 20, y: 20, w: 100, h: 60)], outline: nil)
+        Detection(boxes: [Box(x: 120, y: 120, w: 240, h: 240), Box(x: 20, y: 20, w: 100, h: 60)], outline: nil,
+                  model: "test boxes")
     }
 }
 
@@ -190,7 +211,7 @@ final class YOLOEDetector: Detector {
             if kept.contains(where: { iou($0, c) > settings.mergeIoU }) { continue }
             kept.append(c)
         }
-        if kept.isEmpty { return Detection(boxes: [], outline: Data(count: Detection.outlineBytes)) }
+        if kept.isEmpty { return Detection(boxes: [], outline: Data(count: Detection.outlineBytes), model: "YOLOE") }
 
         // 3. Masks: coefficients (k x nm) times prototypes (nm x P*P) -> k masks of P x P logits.
         let p = proto.shape[2].intValue
@@ -247,21 +268,10 @@ final class YOLOEDetector: Detector {
             }
             guard maxX >= 0 else { continue }   // empty mask: nothing to outline
 
-            // Border = inside pixels with a 4-neighbour outside (or at the box edge).
-            for y in minY...maxY {
-                for x in minX...maxX where inside[y * w + x] {
-                    let edge = x == 0 || y == 0 || x == w - 1 || y == h - 1 ||
-                        !inside[y * w + x - 1] || !inside[y * w + x + 1] ||
-                        !inside[(y - 1) * w + x] || !inside[(y + 1) * w + x]
-                    if edge {
-                        let px = bx1 + x, py = by1 + y
-                        outline[py * (n / 8) + px / 8] |= 0x80 >> UInt8(px % 8)
-                    }
-                }
-            }
+            Detection.addBorder(of: inside, w: w, h: h, at: bx1, by1, within: minX, minY, maxX, maxY, to: &outline)
             boxes.append(Box(x: bx1 + minX, y: by1 + minY, w: maxX - minX + 1, h: maxY - minY + 1))   // tight to the mask
         }
-        return Detection(boxes: boxes, outline: Data(outline))
+        return Detection(boxes: boxes, outline: Data(outline), model: "YOLOE")
     }
 
     private func iou(_ a: Cand, _ b: Cand) -> Float {

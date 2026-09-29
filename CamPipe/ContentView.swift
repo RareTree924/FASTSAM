@@ -63,7 +63,7 @@ struct ContentView: View {
 
     private var settingsPanel: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("YOLOE settings").font(.headline)
+            Text("Outline settings").font(.headline)
 
             Toggle("Use the S3's settings", isOn: $pipe.useS3Settings)
             Text(pipe.s3Settings.map { s3 in
@@ -78,14 +78,14 @@ struct ContentView: View {
                 .textFieldStyle(.roundedBorder)
                 .textInputAutocapitalization(.never)
                 .disableAutocorrection(true)
-            Text("Type a thing, e.g. \"mug\", to outline only that. On the S3 you type it right after taking the photo.")
+            Text("Type a thing, e.g. \"mug\", to outline only that (SAM 3); blank outlines everything (YOLOE). On the S3 you type it right after taking the photo.")
                 .font(.caption2)
                 .foregroundColor(.secondary)
 
             Text("Min confidence (phone): \(pct(pipe.phoneSettings.minScore))")
                 .font(.subheadline)
             Slider(value: $pipe.phoneSettings.minScore, in: 0.05...0.95, step: 0.05)
-            Text("Outline an object only if YOLOE is at least this sure. Lower = more outlines.")
+            Text("Outline an object only if the model is at least this sure. Lower = more outlines.")
                 .font(.caption2)
                 .foregroundColor(.secondary)
 

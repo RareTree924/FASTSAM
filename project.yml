@@ -2,7 +2,11 @@ name: CamPipe
 options:
   bundleIdPrefix: dev.local
   deploymentTarget:
-    iOS: "16.0"   # the YOLOE Core ML models are built for iOS 16+
+    iOS: "27.0"   # SAM 3 runs on Core AI (iOS 27+)
+packages:
+  CoreAIModels:   # Apple's Core AI runtime helpers; pinned to the commit SAM3/ is exported from (main.yml)
+    url: https://github.com/apple/coreai-models
+    revision: 41922177d06d50cc878e18e3bbad79b5a02c65fd
 targets:
   CamPipe:
     type: application
@@ -10,6 +14,12 @@ targets:
     scheme: {}          # shared scheme, so xcodebuild -scheme CamPipe always finds it on CI
     sources:
       - path: CamPipe
+      - path: SAM3        # SAM 3 model bundle from the Build IPA workflow (not in git: ~600 MB)
+        type: folder      # copied into the app as one folder, as ImageSegmenter expects
+        optional: true
+    dependencies:
+      - package: CoreAIModels
+        product: CoreAISegmentation
     info:
       path: CamPipe/Info.plist
       properties:

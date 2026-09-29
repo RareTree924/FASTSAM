@@ -5,7 +5,9 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: xcode-27   # Xcode 27 on macOS 27: SAM 3 runs on Core AI (iOS 27 SDK)
+    env:
+      COREAI_REV: 41922177d06d50cc878e18e3bbad79b5a02c65fd   # apple/coreai-models; keep in step with project.yml
     steps:
       - uses: actions/checkout@v4
 
@@ -13,6 +15,35 @@ jobs:
         run: |
           swiftc -O CamPipe/Tokenizer.swift tools/tokenizer_test/main.swift -o tokenizer_test
           ./tokenizer_test CamPipe/clip_merges.txt tools/tokenizer_tests.json
+
+      # SAM 3 (~600 MB) is too big for git, so it is exported here once and cached.
+      - name: Reuse the SAM 3 export
+        id: sam3
+        uses: actions/cache@v4
+        with:
+          path: SAM3
+          key: sam3-lite-336-${{ env.COREAI_REV }}
+
+      - name: Export SAM 3 for iOS (only when not cached)
+        if: steps.sam3.outputs.cache-hit != 'true'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}   # facebook/sam3 is gated on Hugging Face
+        run: |
+          if [ -z "$HF_TOKEN" ]; then
+            echo "::error::Accept the license at https://huggingface.co/facebook/sam3, then add a Hugging Face read token as the HF_TOKEN repository secret"
+            exit 1
+          fi
+          brew install uv
+          git clone https://github.com/apple/coreai-models.git "$RUNNER_TEMP/coreai-models"
+          cd "$RUNNER_TEMP/coreai-models"
+          git checkout "$COREAI_REV"
+          # Apple's lite iOS export: 336x336, 4-bit image encoder, 6-bit text encoder.
+          uv run models/sam3/export.py --output-dir "$GITHUB_WORKSPACE" --output-name SAM3
+
+      - name: Check the SAM 3 bundle
+        run: |
+          test -f SAM3/metadata.json && test -d SAM3/tokenizer && ls SAM3/*.aimodel
+          du -sh SAM3
 
       - name: Install XcodeGen
         run: brew install xcodegen
@@ -26,6 +57,7 @@ jobs:
             -configuration Release -sdk iphoneos \
             -destination 'generic/platform=iOS' \
             -derivedDataPath build \
+            -skipPackagePluginValidation -skipMacroValidation \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             build
 
