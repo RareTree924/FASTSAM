@@ -21,6 +21,7 @@ struct ContentView: View {
                 Text(pipe.detectorNote)
                     .font(.caption)
                     .foregroundColor(.secondary)
+                    .textSelection(.enabled)   // long-press to copy (e.g. a SAM 3 load error)
 
                 Text(pipe.status)
                     .font(.footnote)

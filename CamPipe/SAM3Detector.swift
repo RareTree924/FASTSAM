@@ -1,6 +1,7 @@
 import CoreAIImageSegmenter
 import CoreGraphics
 import Foundation
+import os
 
 /// SAM 3 (Meta) through Apple's Core AI for typed words: it finds the named thing far more
 /// reliably than YOLOE's text prompt. SAM 3 always needs a word, so photos with nothing
@@ -49,9 +50,40 @@ private actor SAM3Model {
         guard let url = Bundle.main.url(forResource: "SAM3", withExtension: nil) else {
             throw DetectorError.modelMissing("SAM3")
         }
-        let segmenter = try await ImageSegmenter(resourcesAt: url.path)
-        try await segmenter.warmup()   // the first run compiles the model for this phone: do it now, not on a photo
+        let freeMB = os_proc_available_memory() / 1_000_000
+        let segmenter: ImageSegmenter
+        do {
+            segmenter = try await ImageSegmenter(resourcesAt: url.path)   // specializes the model for this phone
+        } catch {
+            throw LoadError(step: "loading", error: error, freeMB: freeMB)
+        }
+        do {
+            try await segmenter.warmup()   // first run on a dummy photo, so a real one doesn't wait for it
+        } catch {
+            throw LoadError(step: "first run", error: error, freeMB: freeMB)
+        }
         return SAM3Model(segmenter)
+    }
+
+    /// Core AI's own messages are just "AIModelError error N", so this spells out
+    /// everything the error carries, plus the phone and its free memory.
+    private struct LoadError: LocalizedError {
+        let step: String
+        let error: Error
+        let freeMB: Int
+
+        var errorDescription: String? {
+            let ns = error as NSError
+            var s = "\(step) failed: \(String(reflecting: error)) [\(ns.domain) \(ns.code)]"
+            if let d = ns.userInfo[NSDebugDescriptionErrorKey] as? String { s += " \(d)" }
+            if let u = ns.userInfo[NSUnderlyingErrorKey] as? NSError {
+                s += " <- \(u.domain) \(u.code): \(u.localizedDescription)"
+            }
+            var u = utsname()
+            uname(&u)
+            let phone = withUnsafeBytes(of: &u.machine) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+            return s + "; \(phone), \(freeMB) MB free before loading"
+        }
     }
 
     func detect(_ image: CGImage, prompt: String, settings: SamSettings) async throws -> Detection {
