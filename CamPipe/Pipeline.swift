@@ -83,6 +83,8 @@ final class Pipeline: ObservableObject {
         didSet {
             UserDefaults.standard.set(phoneSettings.minScore, forKey: "samMinScore")
             UserDefaults.standard.set(phoneSettings.mergeIoU, forKey: "samMergeIoU")
+            UserDefaults.standard.set(phoneSettings.backgroundShare, forKey: "samBackground")
+            UserDefaults.standard.set(phoneSettings.surroundShare, forKey: "samSurround")
             UserDefaults.standard.set(phoneSettings.prompt, forKey: "samPrompt")
         }
     }
@@ -99,10 +101,14 @@ final class Pipeline: ObservableObject {
         let d = UserDefaults.standard
         d.register(defaults: ["samMinScore": SamSettings().minScore,
                               "samMergeIoU": SamSettings().mergeIoU,
+                              "samBackground": SamSettings().backgroundShare,
+                              "samSurround": SamSettings().surroundShare,
                               "samPrompt": "",
                               "samUseS3": true])
         phoneSettings = SamSettings(minScore: d.float(forKey: "samMinScore"),
                                     mergeIoU: d.float(forKey: "samMergeIoU"),
+                                    backgroundShare: d.float(forKey: "samBackground"),
+                                    surroundShare: d.float(forKey: "samSurround"),
                                     prompt: d.string(forKey: "samPrompt") ?? "")
         useS3Settings = d.bool(forKey: "samUseS3")
 
@@ -131,13 +137,18 @@ final class Pipeline: ObservableObject {
     }
 
     /// X-Sam-Min-Score / X-Sam-Merge-Iou (whole percents) from the CAM, if both are present,
-    /// plus X-Sam-Prompt (percent-encoded; missing = outline everything).
-    private static func samSettings(from http: HTTPURLResponse) -> SamSettings? {
-        guard let s = http.value(forHTTPHeaderField: "X-Sam-Min-Score").flatMap(Int.init),
-              let m = http.value(forHTTPHeaderField: "X-Sam-Merge-Iou").flatMap(Int.init) else { return nil }
+    /// plus X-Sam-Prompt (percent-encoded; missing = outline everything) and the background
+    /// filter X-Sam-Background / X-Sam-Surround (percents; older CAM firmware sends none,
+    /// and then `phone`'s are used).
+    private static func samSettings(from http: HTTPURLResponse, phone: SamSettings) -> SamSettings? {
+        func pct(_ name: String) -> Float? {
+            http.value(forHTTPHeaderField: name).flatMap(Int.init).map { Float(min(max($0, 0), 100)) / 100 }
+        }
+        guard let s = pct("X-Sam-Min-Score"), let m = pct("X-Sam-Merge-Iou") else { return nil }
         let prompt = http.value(forHTTPHeaderField: "X-Sam-Prompt")?.removingPercentEncoding ?? ""
-        return SamSettings(minScore: Float(min(max(s, 0), 100)) / 100,
-                           mergeIoU: Float(min(max(m, 0), 100)) / 100,
+        return SamSettings(minScore: s, mergeIoU: m,
+                           backgroundShare: pct("X-Sam-Background") ?? phone.backgroundShare,
+                           surroundShare: pct("X-Sam-Surround") ?? phone.surroundShare,
                            prompt: prompt)
     }
 
@@ -197,7 +208,7 @@ final class Pipeline: ObservableObject {
                 outline = nil
 
                 // 3. Outline, with the S3's settings and words if this photo carries them.
-                s3Settings = Self.samSettings(from: http)
+                s3Settings = Self.samSettings(from: http, phone: phoneSettings)
                 let settings = (useS3Settings ? s3Settings : nil) ?? phoneSettings
                 lastUsedSettings = settings
                 status = settings.prompt.isEmpty ? "Outlining everything..." : "Looking for \"\(settings.prompt)\"..."

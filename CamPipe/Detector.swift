@@ -15,6 +15,9 @@ struct Box {
 struct SamSettings: Equatable {
     var minScore: Float = 0.25   // outline an object only if YOLOE is at least this sure (0...1)
     var mergeIoU: Float = 0.70   // objects overlapping more than this are merged into one (0...1)
+    // Background filter, as shares of the photo (0...1):
+    var backgroundShare: Float = 0.60   // an outline covering more than this is background
+    var surroundShare: Float = 0.25     // ...as is one this big with a smaller object in a hole of it
     var prompt: String = ""      // what to outline, e.g. "mug"; empty = everything
 }
 
@@ -80,8 +83,6 @@ final class YOLOEDetector: Detector {
     private let size: Float = 480
     private let minSide: Float = 8       // drop objects smaller than this many pixels
     private let maxObjects = 25          // CAM_MAX_BOXES on the ESP32 side
-    private let backgroundShare: Float = 0.60   // a mask covering more of the photo than this is background
-    private let surroundShare: Float = 0.25     // ...as is one this big with a smaller object in a hole of it
 
     private let model: MLModel
     private let textModel: MLModel
@@ -285,9 +286,9 @@ final class YOLOEDetector: Detector {
         let photo = Float(n * n)
         let objects = masks.filter { m in
             let share = Float(m.area) / photo
-            if share > backgroundShare { return false }
+            if share > settings.backgroundShare { return false }
             // Large and wrapped around a smaller object: the surface it sits on.
-            if share > surroundShare && masks.contains(where: { $0.area < m.area && m.surrounds($0) }) { return false }
+            if share > settings.surroundShare && masks.contains(where: { $0.area < m.area && m.surrounds($0) }) { return false }
             return true
         }
 

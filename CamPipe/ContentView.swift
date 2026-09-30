@@ -68,7 +68,8 @@ struct ContentView: View {
             Toggle("Use the S3's settings", isOn: $pipe.useS3Settings)
             Text(pipe.s3Settings.map { s3 in
                 "S3 sent: \(s3.prompt.isEmpty ? "outline everything" : "find \"\(s3.prompt)\""), "
-                    + "confidence \(pct(s3.minScore)), merge overlap \(pct(s3.mergeIoU))"
+                    + "confidence \(pct(s3.minScore)), merge overlap \(pct(s3.mergeIoU)), "
+                    + "background max \(pct(s3.backgroundShare)), surround max \(pct(s3.surroundShare))"
             } ?? "The last photo carried no S3 settings, so the phone's settings below are used.")
                 .font(.caption)
                 .foregroundColor(.secondary)
@@ -96,9 +97,24 @@ struct ContentView: View {
                 .font(.caption2)
                 .foregroundColor(.secondary)
 
+            Text("Background max (phone): \(pct(pipe.phoneSettings.backgroundShare))")
+                .font(.subheadline)
+            Slider(value: $pipe.phoneSettings.backgroundShare, in: 0.05...1.0, step: 0.05)
+            Text("An outline covering more of the photo than this is taken for the floor, a wall or a table, and dropped. Lower = drop more; 100% = off.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+
+            Text("Surround max (phone): \(pct(pipe.phoneSettings.surroundShare))")
+                .font(.subheadline)
+            Slider(value: $pipe.phoneSettings.surroundShare, in: 0.05...1.0, step: 0.05)
+            Text("An outline covering more than this with a smaller object sitting in a hole of it (the table under a mug) is dropped too. Lower = drop more; 100% = off.")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+
             if let used = pipe.lastUsedSettings {
                 Text("Last run: \(used.prompt.isEmpty ? "everything" : "\"\(used.prompt)\""), "
-                     + "\(pct(used.minScore)) / \(pct(used.mergeIoU))")
+                     + "\(pct(used.minScore)) / \(pct(used.mergeIoU)) / "
+                     + "\(pct(used.backgroundShare)) / \(pct(used.surroundShare))")
                     .font(.caption)
             }
         }
