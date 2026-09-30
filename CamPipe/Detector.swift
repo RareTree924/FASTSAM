@@ -80,6 +80,8 @@ final class YOLOEDetector: Detector {
     private let size: Float = 480
     private let minSide: Float = 8       // drop objects smaller than this many pixels
     private let maxObjects = 25          // CAM_MAX_BOXES on the ESP32 side
+    private let backgroundShare: Float = 0.60   // a mask covering more of the photo than this is background
+    private let surroundShare: Float = 0.25     // ...as is one this big with a smaller object in a hole of it
 
     private let model: MLModel
     private let textModel: MLModel
@@ -92,6 +94,34 @@ final class YOLOEDetector: Detector {
         var x1: Float, y1: Float, x2: Float, y2: Float
         var score: Float
         var index: Int
+    }
+
+    /// One object's mask: `inside` is w x h with its top-left at (bx1, by1) in the photo;
+    /// minX...maxX, minY...maxY is the part actually set.
+    private struct Mask {
+        var inside: [Bool]
+        var bx1: Int, by1: Int, w: Int, h: Int
+        var minX: Int, minY: Int, maxX: Int, maxY: Int
+        var area: Int
+
+        var box: Box { Box(x: bx1 + minX, y: by1 + minY, w: maxX - minX + 1, h: maxY - minY + 1) }   // tight to the mask
+
+        /// Whether this mask wraps around `o` - `o`'s box lies within this one's, but this mask
+        /// has a hole where `o` is - the way the floor does around a shoe. A person around
+        /// their shirt covers it instead, and is kept.
+        func surrounds(_ o: Mask) -> Bool {
+            let a = box, b = o.box, slack = 4
+            guard b.x >= a.x - slack, b.y >= a.y - slack,
+                  b.x + b.w <= a.x + a.w + slack, b.y + b.h <= a.y + a.h + slack else { return false }
+            var covered = 0
+            for y in o.minY...o.maxY {
+                for x in o.minX...o.maxX where o.inside[y * o.w + x] {
+                    let px = o.bx1 + x - bx1, py = o.by1 + y - by1
+                    if px >= 0, py >= 0, px < w, py < h, inside[py * w + px] { covered += 1 }
+                }
+            }
+            return covered * 2 < o.area   // less than half of `o` is covered
+        }
     }
 
     init() throws {
@@ -210,9 +240,8 @@ final class YOLOEDetector: Detector {
         var logits = [Float](repeating: 0, count: kept.count * pp)
         vDSP_mmul(coeffs, 1, protos, 1, &logits, 1, vDSP_Length(kept.count), vDSP_Length(pp), vDSP_Length(nm))
 
-        // 4. Each mask, upsampled (bilinear, like Ultralytics) inside its box; its border goes into the outline.
-        var outline = [UInt8](repeating: 0, count: Detection.outlineBytes)
-        var boxes: [Box] = []
+        // 4. Each mask, upsampled (bilinear, like Ultralytics) inside its box.
+        var masks: [Mask] = []
         let n = Int(size)
         let scale = Float(p) / size
         for (j, c) in kept.enumerated() {
@@ -228,7 +257,7 @@ final class YOLOEDetector: Detector {
                 sx0[x] = Int(s); sx1[x] = min(sx0[x] + 1, p - 1); fx[x] = s - Float(sx0[x])
             }
             var inside = [Bool](repeating: false, count: w * h)
-            var minX = w, minY = h, maxX = -1, maxY = -1
+            var minX = w, minY = h, maxX = -1, maxY = -1, area = 0
             logits.withUnsafeBufferPointer { lg in
                 let base = j * pp
                 for y in 0..<h {
@@ -240,26 +269,45 @@ final class YOLOEDetector: Detector {
                         let bot = lg[r1 + sx0[x]] * (1 - fx[x]) + lg[r1 + sx1[x]] * fx[x]
                         if top * (1 - fy) + bot * fy > 0 {   // logit > 0  <=>  mask probability > 0.5
                             inside[y * w + x] = true
+                            area += 1
                             minX = min(minX, x); maxX = max(maxX, x); minY = min(minY, y); maxY = max(maxY, y)
                         }
                     }
                 }
             }
             guard maxX >= 0 else { continue }   // empty mask: nothing to outline
+            masks.append(Mask(inside: inside, bx1: bx1, by1: by1, w: w, h: h,
+                              minX: minX, minY: minY, maxX: maxX, maxY: maxY, area: area))
+        }
 
-            // Border = inside pixels with a 4-neighbour outside (or at the box edge).
-            for y in minY...maxY {
-                for x in minX...maxX where inside[y * w + x] {
+        // 5. Drop the background (floor, wall, table top...): YOLOE's vocabulary names those
+        //    too, so they come back as one big "object".
+        let photo = Float(n * n)
+        let objects = masks.filter { m in
+            let share = Float(m.area) / photo
+            if share > backgroundShare { return false }
+            // Large and wrapped around a smaller object: the surface it sits on.
+            if share > surroundShare && masks.contains(where: { $0.area < m.area && m.surrounds($0) }) { return false }
+            return true
+        }
+
+        // 6. Borders = inside pixels with a 4-neighbour outside (or at the box edge).
+        var outline = [UInt8](repeating: 0, count: Detection.outlineBytes)
+        var boxes: [Box] = []
+        for m in objects {
+            let w = m.w, h = m.h
+            for y in m.minY...m.maxY {
+                for x in m.minX...m.maxX where m.inside[y * w + x] {
                     let edge = x == 0 || y == 0 || x == w - 1 || y == h - 1 ||
-                        !inside[y * w + x - 1] || !inside[y * w + x + 1] ||
-                        !inside[(y - 1) * w + x] || !inside[(y + 1) * w + x]
+                        !m.inside[y * w + x - 1] || !m.inside[y * w + x + 1] ||
+                        !m.inside[(y - 1) * w + x] || !m.inside[(y + 1) * w + x]
                     if edge {
-                        let px = bx1 + x, py = by1 + y
+                        let px = m.bx1 + x, py = m.by1 + y
                         outline[py * (n / 8) + px / 8] |= 0x80 >> UInt8(px % 8)
                     }
                 }
             }
-            boxes.append(Box(x: bx1 + minX, y: by1 + minY, w: maxX - minX + 1, h: maxY - minY + 1))   // tight to the mask
+            boxes.append(m.box)
         }
         return Detection(boxes: boxes, outline: Data(outline))
     }
