@@ -23,7 +23,7 @@ jobs:
         # numpy 2.4 breaks coremltools conversion (apple/coremltools#2633), as Ultralytics notes too
         run: pip install "ultralytics==8.4.164" "coremltools==9.0" "numpy<=2.3.5" "torch==2.7.0" "torchvision==0.22.0" "git+https://github.com/ultralytics/CLIP.git"
 
-      - name: Export YOLOE-11L-seg + text encoder to Core ML (480x480), and check them against PyTorch
+      - name: Export YOLOE-11L-seg + text encoder to Core ML (640x640), and check them against PyTorch
         run: python tools/export_yoloe.py --out export
 
       - name: Keep a downloadable copy
@@ -40,5 +40,5 @@ jobs:
           git config user.name "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
           git add -A CamPipe tools
-          git commit -m "Add YOLOE-11L-seg + text encoder Core ML models (480x480)"
+          git commit -m "Add YOLOE-11L-seg + text encoder Core ML models (640x640)"
           git push

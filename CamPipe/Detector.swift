@@ -74,14 +74,16 @@ private struct FloatReader {
     }
 }
 
-/// YOLOE-11L-seg through Core ML (see tools/export_yoloe.py).
-///   det   [1, 38, 4725]: cx, cy, w, h (pixels), text score, object score, 32 mask coefficients
-///   proto [1, 32, 120, 120]: mask prototypes
+/// YOLOE-11L-seg through Core ML (see tools/export_yoloe.py), run on the photo at the
+/// model's own size (640x640; older exports 480x480). Results are in the 480x480 the S3 shows.
+///   det   [1, 38, 8400]: cx, cy, w, h (model pixels), text score, object score, 32 mask coefficients
+///   proto [1, 32, 160, 160]: mask prototypes, covering the whole photo
 /// With a prompt, objects are scored against the typed words (text score); without
 /// one, YOLOE's prompt-free object score is used to outline everything.
 final class YOLOEDetector: Detector {
-    private let size: Float = 480
-    private let minSide: Float = 8       // drop objects smaller than this many pixels
+    private let size: Float = 480        // results: the photo as the S3 shows it (CAM_OUT_SIZE)
+    private let inSize: Float            // what the model sees; Core ML scales the photo to it
+    private let minSide: Float = 8       // drop objects smaller than this many (480) pixels
     private let maxObjects = 25          // CAM_MAX_BOXES on the ESP32 side
 
     private let model: MLModel
@@ -136,6 +138,7 @@ final class YOLOEDetector: Detector {
             throw DetectorError.badModel("no image input")
         }
         constraint = c
+        inSize = Float(c.pixelsWide)
         noText = try MLMultiArray(shape: [1, 1, 512], dataType: .float32)   // zeros: unused without a prompt
         for i in 0..<noText.count { noText[i] = 0 }
     }
@@ -202,12 +205,13 @@ final class YOLOEDetector: Detector {
         let dr = FloatReader(det)
         func read(_ ch: Int, _ i: Int) -> Float { dr.at(ch * d1 + i * d2) }
 
-        // 1. Confident candidates, as clamped corners.
+        // 1. Confident candidates, as clamped corners in 480x480 pixels.
+        let k = size / inSize
         var cands: [Cand] = []
         for i in 0..<anchors {
             let s = read(scoreChannel, i)
             if s < settings.minScore { continue }
-            let cx = read(0, i), cy = read(1, i), w = read(2, i), h = read(3, i)
+            let cx = read(0, i) * k, cy = read(1, i) * k, w = read(2, i) * k, h = read(3, i) * k
             let c = Cand(x1: max(0, cx - w / 2), y1: max(0, cy - h / 2),
                          x2: min(size, cx + w / 2), y2: min(size, cy + h / 2), score: s, index: i)
             if c.x2 - c.x1 >= minSide && c.y2 - c.y1 >= minSide { cands.append(c) }

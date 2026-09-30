@@ -1,8 +1,8 @@
 """Exports YOLOE-11L-seg for the CamPipe app as two Core ML models + tokenizer data.
 
-  YOLOE-seg.mlpackage   image [1,3,480,480] (RGB, 0-255) + text [1,1,512]
-                        -> det   [1, 4+2+32, 4725]  cx, cy, w, h (pixels), text score, object score, 32 mask coefficients
-                        -> proto [1, 32, 120, 120]  mask prototypes
+  YOLOE-seg.mlpackage   image [1,3,640,640] (RGB, 0-255) + text [1,1,512]
+                        -> det   [1, 4+2+32, 8400]  cx, cy, w, h (pixels), text score, object score, 32 mask coefficients
+                        -> proto [1, 32, 160, 160]  mask prototypes
                         "text score": how well each spot matches the typed words (YOLOE text prompt).
                         "object score": YOLOE's prompt-free score (best match over its 4,585-name
                         vocabulary) - used when nothing was typed, to outline everything.
@@ -32,7 +32,7 @@ from ultralytics.nn.text_model import build_text_model
 from ultralytics.utils import ASSETS
 from ultralytics.utils.tal import dist2bbox, make_anchors
 
-SIZE = 480
+SIZE = 640   # YOLOE's training size; the camera sends 640x640 photos to match
 
 
 class YOLOEOutlines(nn.Module):
@@ -126,7 +126,7 @@ class TextEncoder(nn.Module):
 
 
 def load_image():
-    """bus.jpg centre-cropped to a 480x480 square, like the photos from the camera."""
+    """bus.jpg centre-cropped to a 640x640 square, like the photos from the camera."""
     from PIL import Image
     im = Image.open(ASSETS / "bus.jpg").convert("RGB")
     s = min(im.size)
@@ -234,7 +234,7 @@ def main():
         compute_precision=ct.transform.FP16ComputePrecision(
             op_selector=lambda op: op.op_type not in {"linear", "reduce_max"}),
     )
-    mlmodel.short_description = "YOLOE-11L-seg: text-prompted + prompt-free boxes and masks, 480x480"
+    mlmodel.short_description = "YOLOE-11L-seg: text-prompted + prompt-free boxes and masks, 640x640"
     mlmodel.save(os.path.join(args.out, "YOLOE-seg.mlpackage"))
 
     with torch.no_grad():

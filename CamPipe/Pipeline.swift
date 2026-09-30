@@ -194,12 +194,13 @@ final class Pipeline: ObservableObject {
                     continue
                 }
 
-                // 2. Center-crop the 480x480 square (x offset 80 for a 640x480 photo; the
-                //    OV2640 sends 480x480, where this is a no-op).
-                let cx = (photo.width - outSize) / 2
-                let cy = (photo.height - outSize) / 2
-                guard cx >= 0, cy >= 0,
-                      let square = photo.cropping(to: CGRect(x: cx, y: cy, width: outSize, height: outSize)) else {
+                // 2. Center-crop the square: the OV2640 sends a square already (640x640 photos,
+                //    480x480 from older firmware); other sensors' 640x480 lose 80 px a side.
+                //    Whatever its size, the results come back in 480x480 for the S3.
+                let side = min(photo.width, photo.height)
+                guard side >= outSize,
+                      let square = photo.cropping(to: CGRect(x: (photo.width - side) / 2, y: (photo.height - side) / 2,
+                                                             width: side, height: side)) else {
                     status = "Photo too small: \(photo.width)x\(photo.height)"
                     await pause(500)
                     continue
