@@ -25,17 +25,32 @@ private func encodeBoxes(frameId: UInt8, boxes: [Box]) -> Data {
     return Data(bytes)
 }
 
-/// The outline bitmap as a green-on-transparent picture for the preview (each
-/// border pixel drawn 2x2 so it shows up at phone size).
-private func outlineImage(_ bits: Data) -> UIImage? {
+/// One neon colour per object, in box order - the same list as the S3's viewer
+/// (k_object_colors in its main.c). No pink or purple.
+private let objectColors: [(UInt8, UInt8, UInt8)] = [
+    (57, 255, 20),    // neon green
+    (255, 110, 0),    // neon orange
+    (0, 240, 255),    // cyan
+    (255, 40, 40),    // neon red
+    (40, 120, 255),   // electric blue
+    (0, 255, 170),    // mint
+]
+
+/// The outline bitmap on a transparent picture for the preview, each object in its own
+/// colour (each border pixel drawn 2x2 so it shows up at phone size). Like the S3, a
+/// border pixel belongs to the smallest box holding it.
+private func outlineImage(_ bits: Data, boxes: [Box]) -> UIImage? {
     let n = outSize
+    let order = boxes.indices.sorted { boxes[$0].w * boxes[$0].h < boxes[$1].w * boxes[$1].h }   // smallest first
     var rgba = [UInt8](repeating: 0, count: n * n * 4)
     bits.withUnsafeBytes { (b: UnsafeRawBufferPointer) in
         for y in 0..<n {
             for x in 0..<n where b[y * (n / 8) + x / 8] & (0x80 >> UInt8(x % 8)) != 0 {
+                let i = order.first { let r = boxes[$0]; return x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h } ?? 0
+                let (r, g, bl) = objectColors[i % objectColors.count]
                 for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] where x + dx < n && y + dy < n {
                     let o = ((y + dy) * n + x + dx) * 4
-                    rgba[o] = 0; rgba[o + 1] = 255; rgba[o + 2] = 0; rgba[o + 3] = 255
+                    rgba[o] = r; rgba[o + 1] = g; rgba[o + 2] = bl; rgba[o + 3] = 255
                 }
             }
         }
@@ -189,7 +204,7 @@ final class Pipeline: ObservableObject {
                 let t0 = Date()
                 let found = try await detector.detect(square, settings: settings)
                 boxes = found.boxes
-                outline = found.outline.flatMap(outlineImage)
+                outline = found.outline.flatMap { outlineImage($0, boxes: found.boxes) }
                 let ms = Int(Date().timeIntervalSince(t0) * 1000)
 
                 // 4. Send boxes + borders back to the CAM (it relays them to the S3).
